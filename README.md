@@ -235,7 +235,106 @@ V免签(PHP) 是基于 ThinkPHP 8 + MySQL 实现的一套免签支付程序，�
     + 微信二维码收款推送通知
     + 微信店员收款推送通知
            
+## 易支付 V1 兼容层
+
+本项目新增了易支付（epay）V1 协议兼容层，可对接独角Next、彩虹易支付等支持易支付协议的发卡平台。
+
+### 工作原理
+
+```
+用户下单 → 发卡平台(易支付协议) → vmqfox submit.php/mapi.php → 生成支付页 → 用户扫码付款
+                                                                         ↓
+发卡平台订单状态更新 ← epay回调 ← epay_callback_cron.php ← VmqApk检测到付款
+```
+
+### 核心文件
+
+| 文件 | 说明 |
+|------|------|
+| `app/controller/epay/Epay.php` | 易支付协议控制器（submit/mapi接口 + 回调构建） |
+| `public/submit.php` | 页面跳转模式入口 |
+| `public/mapi.php` | API模式入口 |
+| `route/app.php` | 路由配置（mapi.php/submit.php） |
+| `epay_callback_cron.php` | 独立回调脚本（从.env读取数据库配置） |
+| `epay_callback_loop.sh` | 回调轮询循环脚本 |
+| `epay-callback.service` | systemd服务配置 |
+
+### 部署步骤
+
+#### 1. 发卡平台配置
+
+在发卡平台（如独角Next）添加支付通道：
+- **类型**: epay/wechat
+- **网关地址**: `https://你的域名`
+- **商户ID**: 随意填写（如 1024）
+- **商户密钥**: 填写vmqfox后台的通信密钥
+
+#### 2. 回调服务安装
+
+> **为什么不用appPush原生回调？**
+> appPush使用`fastcgi_finish_request()`异步发回调，但PHP OPcache会缓存旧代码导致回调数据为空，下游平台返回`payment_callback_unrecognized`。独立脚本绕开ThinkPHP/OPcache，稳定可靠。
+
+```bash
+# 上传 epay_callback_cron.php 和 epay_callback_loop.sh 到项目根目录
+# 上传 epay-callback.service 到 /etc/systemd/system/
+
+chmod +x /你的项目路径/epay_callback_loop.sh
+systemctl daemon-reload
+systemctl enable epay-callback
+systemctl start epay-callback
+```
+
+#### 3. 数据库变更
+
+首次运行 `epay_callback_cron.php` 会自动添加 `callback_sent` 字段到 `pay_order` 表。也可以手动执行：
+
+```sql
+ALTER TABLE pay_order ADD COLUMN callback_sent TINYINT DEFAULT 0;
+```
+
+#### 4. 验证
+
+```bash
+# 查看回调日志
+tail -f /你的项目路径/runtime/epay_cron.log
+
+# 查看服务状态
+systemctl status epay-callback
+```
+
+### 易支付签名规则
+
+签名算法与标准易支付V1一致：
+1. 过滤 `sign` 和 `sign_type` 参数，过滤空值
+2. 按参数名ASCII排序
+3. 拼接为 `key1=value1&key2=value2...` 格式
+4. 末尾追加商户密钥
+5. MD5得到签名
+
+### 回调参数格式
+
+| 参数 | 说明 |
+|------|------|
+| `pid` | 商户ID |
+| `type` | wxpay/alipay |
+| `out_trade_no` | 商户订单号 |
+| `trade_no` | vmqfox订单号 |
+| `name` | 商品名称 |
+| `money` | 实付金额 |
+| `trade_status` | TRADE_SUCCESS |
+| `sign` | MD5签名 |
+| `sign_type` | MD5 |
+
+---
+
 ## 更新记录
+  + v2.1（2026.05.12）
+    + **新增易支付V1兼容层** - 支持对接独角Next、彩虹易支付等发卡平台
+    + 新增 `submit.php` / `mapi.php` 接口
+    + 新增独立回调服务（systemd），解决OPcache缓存导致原生回调失败的问题
+    + 新增 `callback_sent` 字段追踪回调状态
+    + 兼容微信/支付宝两种支付方式
+
   + v2.0（2025.07.11）
     + **RESTful API 重构** - 完整的 API 接口设计
     + **前后端分离支持** - 支持独立部署前端和后端
