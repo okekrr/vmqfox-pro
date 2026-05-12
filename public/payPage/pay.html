@@ -40,7 +40,7 @@
                 <div data-role="qrPayImg" class="qrcode-img-area">
                     <div class="ui-loading qrcode-loading" data-role="qrPayImgLoading" style="display: none;">加载中</div>
                     <div style="position: relative;display: inline-block;">
-                        <img  id='show_qrcode' alt="加载中..." :src="'../enQrcode?url='+payUrl" width="210" height="210" style="display: block;">
+                        <img  id='show_qrcode' alt="加载中..." :src="'../enQrcode?url='+encodeURIComponent(payUrl)" width="210" height="210" style="display: block;">
                         <!--<img onclick="$('#use').hide()" id="use" src="use_1.png" v-if="payType==1"
                              style="position: absolute;top: 50%;left: 50%;width:32px;height:32px;margin-left: -16px;margin-top: -16px">
                         <img onclick="$('#use').hide()" id="use" src="use_2.png" v-if="payType==2"

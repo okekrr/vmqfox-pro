@@ -10,6 +10,10 @@
 // +----------------------------------------------------------------------
 use think\facade\Route;
 
+// 易支付V1兼容接口
+Route::any('mapi.php', 'epay/Epay/mapi');
+Route::any('submit.php', 'epay/Epay/submit');
+
 // 兼容前端环境检测接口
 Route::any('index/index/getReturn', 'index/Index/getReturnApi');
 

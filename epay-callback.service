@@ -1,0 +1,13 @@
+[Unit]
+Description=Epay Callback Service
+After=network.target mysql.service
+
+[Service]
+Type=simple
+ExecStart=/www/wwwroot/vmq.okekrr.com/epay_callback_loop.sh
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

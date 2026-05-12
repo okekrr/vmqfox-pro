@@ -5,6 +5,7 @@ use think\facade\Db;
 use think\facade\Session;
 use think\facade\Request;
 use think\facade\Config;
+use app\controller\epay\Epay;
 
 class Index
 {
@@ -423,33 +424,47 @@ class Index
      */
     public function appPush()
     {
+        $logFile = '/www/wwwroot/vmq.okekrr.com/runtime/apppush_debug.log';
+        $log = function($msg) use ($logFile) {
+            file_put_contents($logFile, date('Y-m-d H:i:s') . ' | ' . $msg . "\n", FILE_APPEND);
+        };
+
+        $log("=== appPush START ===");
+        $log("RAW POST: " . file_get_contents("php://input"));
+        $log("GET: " . json_encode($_GET));
+
         // 关闭超时订单
         $this->closeEndOrder();
 
         // 获取密钥
         $res2 = Db::name("setting")->where("vkey", "key")->find();
         $key = $res2['vvalue'];
-        
+
         // 获取必要参数，优先从POST获取，其次GET，再从RAW请求体解析
         $t = $this->getParam('t');
         $type = $this->getParam('type');
         $price = $this->getParam('price');
         $sign = $this->getParam('sign');
-        
+
+        $log("PARAMS: t=$t type=$type price=$price sign=$sign");
+
         if (!$t || !$type || !$price || !$sign) {
+            $log("FAIL: missing params");
             return json($this->getReturn(-1, "缺少必要参数"));
         }
-        
+
         // 尝试多种签名组合方式
         $_sign = $type.$price.$t.$key;
         $sign1 = md5($_sign);
         $sign2 = md5((string)$type.(string)$price.(string)$t.$key);
         $sign3 = md5(trim($type).trim($price).trim($t).trim($key));
-        
+
         // 签名验证，允许多种计算方式
         if ($sign != $sign1 && $sign != $sign2 && $sign != $sign3) {
+            $log("FAIL: sign verify failed. Expected one of: $sign1, $sign2, $sign3");
             return json($this->getReturn(-1, "签名校验不通过"));
         }
+        $log("SIGN OK");
 
         // 更新最后支付时间
         Db::name("setting")->where("vkey", "lastpay")->update(["vvalue" => time()]);
@@ -461,8 +476,11 @@ class Index
             ->where("type", $type)
             ->find();
 
+        $log("ORDER QUERY: price=$price type=$type found=" . ($res ? "YES orderId={$res['order_id']}" : "NO"));
+
         // 如果没有找到匹配订单
         if (!$res) {
+            $log("NO MATCH -> creating 无订单转账");
             try {
                 // 无匹配订单时记录为无订单转账
                 $data = [
@@ -492,53 +510,69 @@ class Index
             }
         }
         
-        // 到这里说明已找到匹配订单，立即响应给客户端，避免连接超时
-        // 这是关键：即发即弃（fire-and-forget）模式
-        $this->asyncResponse($this->getReturn(1, "成功"));
+        $logFile = '/www/wwwroot/vmq.okekrr.com/runtime/apppush_debug.log';
+        $log = function($msg) use ($logFile) {
+            file_put_contents($logFile, date('Y-m-d H:i:s') . ' | ' . $msg . "\n", FILE_APPEND);
+        };
 
+        $log("MATCHED ORDER: orderId={$res['order_id']} payId={$res['pay_id']} type={$res['type']} price={$res['really_price']} param={$res['param']} notifyUrl={$res['notify_url']}");
+
+        // 删除临时价格记录
         try {
-            // 删除临时价格记录
-            Db::name("tmp_price")
-                ->where("oid", $res['order_id'])
-                ->delete();
-
-            // 更新订单状态
-            Db::name("pay_order")->where("id", $res['id'])->update([
-                "state" => 1,
-                "pay_date" => time(),
-                "close_date" => time()
-            ]);
-
-            // 准备通知参数
-            $url = $res['notify_url'];
-            $res2 = Db::name("setting")->where("vkey", "key")->find();
-            $key = $res2['vvalue'];
-
-            $p = "payId=".$res['pay_id']."&param=".$res['param']."&type=".$res['type']."&price=".$res['price']."&reallyPrice=".$res['really_price'];
-            $sign = $res['pay_id'].$res['param'].$res['type'].$res['price'].$res['really_price'].$key;
-            $p = $p . "&sign=".md5($sign);
-
-            // 构建完整URL
-            if (strpos($url, "?") === false) {
-                $url = $url."?".$p;
-            } else {
-                $url = $url."&".$p;
-            }
-            
-            // 发送通知
-            $re = $this->getCurl($url);
-            
-            if ($re != "success") {
-                // 通知失败时标记订单状态为2
-                Db::name("pay_order")->where("id", $res['id'])->update(["state" => 2]);
-            }
-            
-            // 异步模式下不返回任何内容
-            return;
+            Db::name("tmp_price")->where("oid", $res['order_id'])->delete();
         } catch (\Exception $e) {
-            // 异步模式下不返回任何错误信息，因为已经先返回成功了
-            return;
+            $log("WARN tmp_price delete: " . $e->getMessage());
         }
+
+        // 更新订单状态
+        Db::name("pay_order")->where("id", $res['id'])->update([
+            "state" => 1,
+            "pay_date" => time(),
+            "close_date" => time()
+        ]);
+        $log("STATE UPDATED TO 1");
+
+        // 准备通知参数（key已在第432行获取）
+        $url = $res['notify_url'];
+
+        $re = '';
+        try {
+            // 检测是否为易支付订单
+            $epayCallback = Epay::buildEpayCallback($res, $key);
+            if ($epayCallback) {
+                // 易支付格式回调 - POST form data
+                $postData = http_build_query($epayCallback);
+                $log("EPAY CALLBACK | url: {$url} | post: {$postData}");
+                $re = $this->getCurl($url, $postData);
+                $log("EPAY RESPONSE: " . trim($re));
+            } else {
+                // V免签格式回调 - GET
+                $log("VMQ CALLBACK (not epay)");
+                $p = "payId=".$res['pay_id']."&param=".$res['param']."&type=".$res['type']."&price=".$res['price']."&reallyPrice=".$res['really_price'];
+                $vsign = $res['pay_id'].$res['param'].$res['type'].$res['price'].$res['really_price'].$key;
+                $p = $p . "&sign=".md5($vsign);
+
+                if (strpos($url, "?") === false) {
+                    $url = $url."?".$p;
+                } else {
+                    $url = $url."&".$p;
+                }
+                $re = $this->getCurl($url);
+                $log("VMQ RESPONSE: " . trim($re));
+            }
+
+            if (trim($re) != "success") {
+                $log("CALLBACK FAILED, setting state=2");
+                Db::name("pay_order")->where("id", $res['id'])->update(["state" => 2]);
+            } else {
+                $log("CALLBACK SUCCESS");
+            }
+        } catch (\Exception $e) {
+            $log("CALLBACK EXCEPTION: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine());
+            Db::name("pay_order")->where("id", $res['id'])->update(["state" => 2]);
+        }
+
+        return json($this->getReturn(1, "成功"));
     }
     
     /**
@@ -572,7 +606,7 @@ class Index
     {
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 60);  // 与原版保持一致，最大超时时间为60秒
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         
@@ -706,18 +740,22 @@ class Index
         // 格式化价格，保证精度一致
         $res['price'] = number_format($res['price'], 2, ".", "");
         $res['really_price'] = number_format($res['really_price'], 2, ".", "");
-        
+
         // 检查是否有回调URL
         if (empty($res['return_url'])) {
             return json($this->getReturn(1, "订单支付成功，但未设置回调URL"));
         }
-        
-        // 构建回调参数
-        $p = "payId=".$res['pay_id']."&param=".$res['param']."&type=".$res['type']."&price=".$res['price']."&reallyPrice=".$res['really_price'];
-        
-        // 计算签名
-        $sign = $res['pay_id'].$res['param'].$res['type'].$res['price'].$res['really_price'].$key;
-        $p = $p . "&sign=".md5($sign);
+
+        // 检测是否为易支付订单
+        $epayCallback = Epay::buildEpayCallback($res, $key);
+        if ($epayCallback) {
+            $p = http_build_query($epayCallback);
+        } else {
+            // 构建V免签回调参数
+            $p = "payId=".$res['pay_id']."&param=".$res['param']."&type=".$res['type']."&price=".$res['price']."&reallyPrice=".$res['really_price'];
+            $sign = $res['pay_id'].$res['param'].$res['type'].$res['price'].$res['really_price'].$key;
+            $p = $p . "&sign=".md5($sign);
+        }
         
         // 构建完整URL
         $url = $res['return_url'];

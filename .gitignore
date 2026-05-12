@@ -1,6 +1,14 @@
 /.idea
 /.vscode
+.claude/
 
 *.log
 /runtime
 .env
+.DS_Store
+
+# 测试/调试脚本（含数据库密码）
+test_standalone.php
+test_callback.php
+diagnose_callback.sh
+deploy_epay_compat.sh
